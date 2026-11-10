@@ -428,7 +428,7 @@
       },
       // Network fetch: the page-level policy (relays, direct CORS fallback) lives in globalThis.mavexFetch.
       fetch_open(mp, mn, up, un, hp, hn, bp, bn) {
-        const req = { method: readStr(mp, mn), url: readStr(up, un), headers: readStr(hp, hn), body: bn ? m8().slice(bp, bp + bn) : null };
+        const req = { method: str(mp, mn), url: str(up, un), headers: str(hp, hn), body: bn ? m8().slice(bp, bp + bn) : null };
         const id = ++S.fetchSeq;
         const f = { done: false, status: 0, kind: 0, headers: "", note: "", body: new Uint8Array(0) };
         S.fetches[id] = f;
