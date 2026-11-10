@@ -44,7 +44,7 @@
 
   /* ---- Asyncify scheduler: tasks suspend inside blocking imports and are resumed by pump() ---- */
   const AGAIN = 6, EPIPE = 64, AS_UNWIND = 1, AS_REWIND = 2, ASYNC_BUF = 1 << 20;
-  const S = { tasks: new Map(), cur: null, pumping: false, timer: 0, onIdle: null, ttys: [], cols: 80, rows: 24, busy: 0, gen: 0 };
+  const S = { tasks: new Map(), cur: null, pumping: false, timer: 0, onIdle: null, ttys: [], cols: 80, rows: 24, busy: 0, gen: 0, fetches: {}, fetchSeq: 0 };
   const newTtyState = () => ({ icanon: true, echo: true, isig: true, raw: false, onOutput: null });
   S.ttys[0] = newTtyState();
   const ttyOf = (t) => (t.tty === undefined ? (t.tty = K.x.k_proc_tty(t.pid)) : t.tty);
@@ -426,6 +426,40 @@
         const g = S.gen, end = performance.now() + (ms || 20);
         return block(task, () => S.gen !== g || performance.now() >= end, end);
       },
+      // Network fetch: the page-level policy (relays, direct CORS fallback) lives in globalThis.mavexFetch.
+      fetch_open(mp, mn, up, un, hp, hn, bp, bn) {
+        const req = { method: readStr(mp, mn), url: readStr(up, un), headers: readStr(hp, hn), body: bn ? m8().slice(bp, bp + bn) : null };
+        const id = ++S.fetchSeq;
+        const f = { done: false, status: 0, kind: 0, headers: "", note: "", body: new Uint8Array(0) };
+        S.fetches[id] = f;
+        const run = globalThis.mavexFetch;
+        (run ? run(req) : Promise.resolve({ kind: 1, note: "no network layer" }))
+          .then((r) => { Object.assign(f, r); }, (e) => { f.kind = 1; f.note = String(e && e.message || e); })
+          .finally(() => { f.done = true; });
+        return id;
+      },
+      fetch_wait(id) {
+        rewound(task);
+        const f = S.fetches[id];
+        if (!f) return -1;
+        if (!f.done && canBlock(task)) return block(task, () => f.done);
+        return f.done ? f.kind : -2;
+      },
+      fetch_info(id, out) {
+        const f = S.fetches[id]; if (!f) return -1;
+        const d = dv(), enc = new TextEncoder();
+        d.setUint32(out, f.status >>> 0, true); d.setUint32(out + 4, f.kind >>> 0, true);
+        d.setUint32(out + 8, f.body.length >>> 0, true); d.setUint32(out + 12, enc.encode(f.headers).length, true); d.setUint32(out + 16, enc.encode(f.note).length, true);
+        return 0;
+      },
+      fetch_read(id, which, off, ptr, len) {
+        const f = S.fetches[id]; if (!f) return -1;
+        const src = which === 0 ? f.body : new TextEncoder().encode(which === 1 ? f.headers : f.note);
+        const n = Math.max(0, Math.min(len, src.length - off));
+        m8().set(src.subarray(off, off + n), ptr);
+        return n;
+      },
+      fetch_close(id) { delete S.fetches[id]; return 0; },
       tcsetpgrp(g) { K.x.k_tty_set_fg(ttyOf(task), g); return 0; },
       tcgetpgrp: () => K.x.k_tty_get_fg(ttyOf(task)),
       setpgid: (p, g) => K.x.k_setpgid(p || pid, g),
