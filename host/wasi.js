@@ -44,7 +44,7 @@
 
   /* ---- Asyncify scheduler: tasks suspend inside blocking imports and are resumed by pump() ---- */
   const AGAIN = 6, EPIPE = 64, AS_UNWIND = 1, AS_REWIND = 2, ASYNC_BUF = 1 << 20;
-  const S = { tasks: new Map(), cur: null, pumping: false, timer: 0, onIdle: null, ttys: [], cols: 80, rows: 24, busy: 0, gen: 0, fetches: {}, fetchSeq: 0 };
+  const S = { tasks: new Map(), cur: null, pumping: false, timer: 0, onIdle: null, ttys: [], cols: 80, rows: 24, busy: 0, gen: 0, fetches: {}, fetchSeq: 0, socks: {}, sockSeq: 0 };
   const newTtyState = () => ({ icanon: true, echo: true, isig: true, raw: false, rawBy: "", onOutput: null });
   S.ttys[0] = newTtyState();
   const ttyOf = (t) => (t.tty === undefined ? (t.tty = K.x.k_proc_tty(t.pid)) : t.tty);
@@ -114,6 +114,7 @@
     } finally { S.pumping = false; }
     // A process that died (killed or exited) must not leave requests running in the browser.
     for (const id in S.fetches) { const f = S.fetches[id]; if (!S.tasks.has(f.owner)) { try { f.ctl.abort(); } catch (_) {} delete S.fetches[id]; } }
+    for (const id in S.socks) if (!S.tasks.has(S.socks[id].owner)) delete S.socks[id];
     flushOutput();
     clearTimeout(S.timer);
     if (more) { S.timer = setTimeout(pump, 0); return; }
@@ -469,6 +470,42 @@
         return n;
       },
       fetch_close(id) { delete S.fetches[id]; return 0; },
+      // Loopback datagram sockets (127.0.0.1 only). A tab cannot open real UDP sockets, so these only connect
+      // programs inside MavexOS to each other. They are handles of their own, not POSIX file descriptors.
+      sock_open() { const id = ++S.sockSeq; S.socks[id] = { owner: pid, port: 0, q: [], deadline: 0 }; return id; },
+      sock_bind(id, port) {
+        const s = S.socks[id]; if (!s || s.owner !== pid) return -9;
+        if (port < 1 || port > 65535) return -22;
+        if (port < 1024) { const r = K.x.k_proc_creds(pid), eu = r < 0 ? -1 : new Uint32Array(staged(r).buffer)[2]; if (eu !== 0) return -13; }
+        for (const k in S.socks) if (S.socks[k].port === port) return -98;
+        s.port = port; return 0;
+      },
+      sock_sendto(id, port, ptr, len) {
+        const s = S.socks[id]; if (!s || s.owner !== pid) return -9;
+        if (!s.port) { let p = 49152 + (id % 16000); const used = (x) => Object.values(S.socks).some((o) => o.port === x); while (used(p)) p++; s.port = p; }
+        const dst = Object.values(S.socks).find((o) => o.port === port);
+        if (!dst) return -111;
+        if (dst.q.length < 64) dst.q.push({ from: s.port, data: m8().slice(ptr, ptr + len) });
+        S.gen++;
+        return len;
+      },
+      sock_recvfrom(id, ptr, len, outPort, ms) {
+        rewound(task);
+        const s = S.socks[id]; if (!s || s.owner !== pid) return -9;
+        if (!s.q.length) {
+          if (!canBlock(task)) return -11;
+          const now = performance.now();
+          if (!s.deadline) s.deadline = ms > 0 ? now + ms : Infinity;
+          if (now < s.deadline) return block(task, () => s.q.length > 0 || performance.now() >= s.deadline, s.deadline === Infinity ? 0 : s.deadline);
+          s.deadline = 0; return -110;
+        }
+        s.deadline = 0;
+        const m = s.q.shift(), n = Math.min(len, m.data.length);
+        m8().set(m.data.subarray(0, n), ptr);
+        if (outPort) dv().setUint32(outPort, m.from, true);
+        return n;
+      },
+      sock_close(id) { const s = S.socks[id]; if (s && s.owner === pid) delete S.socks[id]; return 0; },
       // Background services (started by init, not by a login shell) never own the terminal: letting them
       // set the foreground group would steal Ctrl+C from whatever the user is running.
       tcsetpgrp(g) { if (task.daemon) return 0; K.x.k_tty_set_fg(ttyOf(task), g); return 0; },
