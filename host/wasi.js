@@ -112,6 +112,8 @@
         if (progressed && performance.now() > budget) { more = true; break; }
       }
     } finally { S.pumping = false; }
+    // A process that died (killed or exited) must not leave requests running in the browser.
+    for (const id in S.fetches) { const f = S.fetches[id]; if (!S.tasks.has(f.owner)) { try { f.ctl.abort(); } catch (_) {} delete S.fetches[id]; } }
     flushOutput();
     clearTimeout(S.timer);
     if (more) { S.timer = setTimeout(pump, 0); return; }
@@ -430,7 +432,8 @@
       fetch_open(mp, mn, up, un, hp, hn, bp, bn) {
         const req = { method: str(mp, mn), url: str(up, un), headers: str(hp, hn), body: bn ? m8().slice(bp, bp + bn) : null };
         const id = ++S.fetchSeq;
-        const f = { done: false, status: 0, kind: 0, headers: "", note: "", body: new Uint8Array(0) };
+        const f = { done: false, status: 0, kind: 0, headers: "", note: "", body: new Uint8Array(0), owner: pid, ctl: new AbortController() };
+        req.signal = f.ctl.signal; // aborted when the owning process goes away
         S.fetches[id] = f;
         const run = globalThis.mavexFetch;
         (run ? run(req) : Promise.resolve({ kind: 1, note: "no network layer" }))
