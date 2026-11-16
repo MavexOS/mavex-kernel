@@ -45,7 +45,7 @@
   /* ---- Asyncify scheduler: tasks suspend inside blocking imports and are resumed by pump() ---- */
   const AGAIN = 6, EPIPE = 64, AS_UNWIND = 1, AS_REWIND = 2, ASYNC_BUF = 1 << 20;
   const S = { tasks: new Map(), cur: null, pumping: false, timer: 0, onIdle: null, ttys: [], cols: 80, rows: 24, busy: 0, gen: 0, fetches: {}, fetchSeq: 0 };
-  const newTtyState = () => ({ icanon: true, echo: true, isig: true, raw: false, onOutput: null });
+  const newTtyState = () => ({ icanon: true, echo: true, isig: true, raw: false, rawBy: "", onOutput: null });
   S.ttys[0] = newTtyState();
   const ttyOf = (t) => (t.tty === undefined ? (t.tty = K.x.k_proc_tty(t.pid)) : t.tty);
   const canBlock = (t) => !!t && !t.sync && t.asyncify;
@@ -152,7 +152,9 @@
     return false;
   }
   function ttySet(tt, m) { const t = S.ttys[tt]; t.icanon = !!(m & 1); t.echo = !!(m & 2); t.isig = !!(m & 4); t.raw = !t.icanon; }
-  const ttyReset = (tt) => { const t = S.ttys[tt]; ttySet(tt, 1 | (t.echo ? 2 : 0) | (t.isig ? 4 : 0)); };
+  const ttyReset = (tt) => { const t = S.ttys[tt]; ttySet(tt, 1 | (t.echo ? 2 : 0) | (t.isig ? 4 : 0)); t.rawBy = ""; };
+  // Name (argv[0] basename) of the program that put a tty in raw mode: it owns the keyboard until it leaves raw mode.
+  const progName = (p) => { const n = K.x.k_proc_args(p); return n > 0 ? new TextDecoder().decode(staged(n)).split("\0")[0].replace(/^.*\//, "") : ""; };
   const winch = () => S.ttys.forEach((_, i) => ttySignal(i, SIG.WINCH));
   const killForeground = (tt) => ttySignal(tt, SIG.INT);
   const stopForeground = (tt) => ttySignal(tt, SIG.TSTP);
@@ -476,9 +478,9 @@
       setsid: () => K.x.k_setsid(pid),
       tty_name() { return ttyOf(task) + 1; },
       tty_size(out) { const d = dv(); d.setUint32(out, S.cols, true); d.setUint32(out + 4, S.rows, true); return 0; },
-      tty_raw(on) { ttySet(ttyOf(task), on ? 4 : 7); return 0; },
+      tty_raw(on) { const tt = ttyOf(task); ttySet(tt, on ? 4 : 7); S.ttys[tt].rawBy = on ? progName(pid) : ""; return 0; },
       tty_getattr() { const t = S.ttys[ttyOf(task)]; return (t.icanon ? 1 : 0) | (t.echo ? 2 : 0) | (t.isig ? 4 : 0); },
-      tty_setattr(m) { ttySet(ttyOf(task), m); return 0; },
+      tty_setattr(m) { const tt = ttyOf(task); ttySet(tt, m); S.ttys[tt].rawBy = (m & 1) ? "" : progName(pid); return 0; },
       dup: (fd) => K.x.k_fd_dup(pid, fd),
       park() { throw new ParkSignal(); },
       getcreds(out) { const r = K.x.k_proc_creds(pid); if (r < 0) return r; m8().set(staged(r), out); return 0; },
