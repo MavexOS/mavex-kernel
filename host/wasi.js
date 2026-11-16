@@ -435,6 +435,10 @@
         const f = { done: false, status: 0, kind: 0, headers: "", note: "", body: new Uint8Array(0), owner: pid, ctl: new AbortController() };
         req.signal = f.ctl.signal; // aborted when the owning process goes away
         S.fetches[id] = f;
+        if (req.method === "BACKUP" || req.method === "RESTORE") { // the whole disk, root-only files included
+          const r = K.x.k_proc_creds(pid), eu = r < 0 ? -1 : new Uint32Array(staged(r).buffer)[2];
+          if (eu !== 0) { f.kind = 1; f.note = "permission denied: only root may back up or restore the whole disk (use sudo)"; f.done = true; return id; }
+        }
         const run = globalThis.mavexFetch;
         (run ? run(req) : Promise.resolve({ kind: 1, note: "no network layer" }))
           .then((r) => { Object.assign(f, r); }, (e) => { f.kind = 1; f.note = String(e && e.message || e); })
