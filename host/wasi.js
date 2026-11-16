@@ -147,7 +147,7 @@
   function sendSignal(target, sig) { for (const t of signalTargets(target)) deliver(t, sig); pump(); }
   function ttySignal(tt, sig) {
     const fg = K.x.k_tty_get_fg(tt);
-    if (fg > 0 && signalTargets(-fg).some((t) => !t.shell)) { sendSignal(-fg, sig); for (const t of S.tasks.values()) if (t.shell && ttyOf(t) === tt ) t.sigPending |= 1 << (sig - 1); return true; }
+    if (fg > 0 && signalTargets(-fg).some((t) => !t.shell && !t.daemon)) { sendSignal(-fg, sig); for (const t of S.tasks.values()) if (t.shell && ttyOf(t) === tt ) t.sigPending |= 1 << (sig - 1); return true; }
     if (sig === SIG.INT) { for (const t of S.tasks.values()) if (!t.shell && !t.daemon && ttyOf(t) === tt) deliver(t, SIG.INT); pump(); return true; }
     return false;
   }
@@ -463,7 +463,9 @@
         return n;
       },
       fetch_close(id) { delete S.fetches[id]; return 0; },
-      tcsetpgrp(g) { K.x.k_tty_set_fg(ttyOf(task), g); return 0; },
+      // Background services (started by init, not by a login shell) never own the terminal: letting them
+      // set the foreground group would steal Ctrl+C from whatever the user is running.
+      tcsetpgrp(g) { if (task.daemon) return 0; K.x.k_tty_set_fg(ttyOf(task), g); return 0; },
       tcgetpgrp: () => K.x.k_tty_get_fg(ttyOf(task)),
       setpgid: (p, g) => K.x.k_setpgid(p || pid, g),
       getpgid: (p) => K.x.k_getpgid(p || pid),
